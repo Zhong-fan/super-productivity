@@ -24,6 +24,17 @@ import type { WebdavPrivateCfg } from './webdav.model';
  */
 const STRONG_ETAG_RE = /^"[\x21\x23-\x7e\x80-\xff]*"$/;
 
+/**
+ * Content-coding suffix Apache appends to the strong ETag it serves on a
+ * compressed response (`mod_deflate`'s default `DeflateAlterETag AddSuffix`,
+ * `mod_brotli` likewise). The DAV backend keeps comparing `If-Match` against
+ * the bare tag, so echoing the served tag fails with 412 on every upload
+ * (#9154, #10808). Such a tag is treated like a weak one: it never drives
+ * `If-Match`, and the rev falls back to the content hash. The bare spelling is
+ * never derived from it, so no rewritten tag can match a concurrent revision.
+ */
+const CONTENT_CODING_ETAG_SUFFIX_RE = /-(?:gzip|br|deflate)"$/;
+
 export interface WebdavApiDeps {
   logger: SyncLogger;
   /**
@@ -82,7 +93,7 @@ export class WebdavApi {
       ([name]) => name.toLowerCase() === headerName,
     );
     const etag = entry?.[1]?.trim();
-    return etag && STRONG_ETAG_RE.test(etag) ? etag : undefined;
+    return etag && this._isConditionalEtag(etag) ? etag : undefined;
   }
 
   /**
@@ -94,7 +105,8 @@ export class WebdavApi {
    * extension; generic WebDAV entity tags are opaque and must never be
    * rewritten. If browser CORS hides `OC-ETag`, Nextcloud falls back to the
    * existing content-hash check instead of trusting a potentially rewritten
-   * HTTP `ETag`.
+   * HTTP `ETag`. A generic `ETag` carrying a content-coding suffix likewise
+   * falls back to the content hash (see `CONTENT_CODING_ETAG_SUFFIX_RE`).
    */
   private _readStrongRevision(headers: Record<string, string>): string | undefined {
     if (this._deps.useCanonicalOcEtag) {
@@ -104,8 +116,9 @@ export class WebdavApi {
     return this._readStrongEtag(headers, 'etag');
   }
 
-  private _isStrongEtag(value: string): boolean {
-    return STRONG_ETAG_RE.test(value);
+  /** A strong tag the server can be expected to compare `If-Match` against. */
+  private _isConditionalEtag(value: string): boolean {
+    return STRONG_ETAG_RE.test(value) && !CONTENT_CODING_ETAG_SUFFIX_RE.test(value);
   }
 
   private _isHttpStatus(error: unknown, status: number): boolean {
@@ -224,8 +237,11 @@ export class WebdavApi {
     const expectedHash = await this._computeContentHash(data);
 
     try {
+      // A `-gzip` tag stored by an earlier version is not conditional either:
+      // it takes the content-hash check, mismatches once and is replaced by the
+      // re-download's hash rev through the adapter's normal mismatch retry.
       const strongExpectedRev =
-        expectedRev && this._isStrongEtag(expectedRev) ? expectedRev : undefined;
+        expectedRev && this._isConditionalEtag(expectedRev) ? expectedRev : undefined;
 
       // Servers without a strong ETag retain the legacy content-hash check. This
       // detects stale writers but cannot close the GET→PUT race; strong ETags do
