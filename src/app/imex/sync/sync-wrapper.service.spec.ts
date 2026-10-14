@@ -2913,6 +2913,51 @@ describe('SyncWrapperService', () => {
       expect(mockProviderManager.setSyncStatus).not.toHaveBeenCalledWith('ERROR');
     });
 
+    it('should surface uploads rejected cycle after cycle once, until a sync completes (#10808)', async () => {
+      const rejectUpload = (): void => {
+        mockSyncService.uploadPendingOps.and.returnValue(
+          Promise.reject(new UploadRevToMatchMismatchAPIError('retries exhausted')),
+        );
+      };
+      const rejectedNotices = (): number =>
+        mockSnackService.open.calls
+          .allArgs()
+          .filter(
+            ([params]) =>
+              typeof params === 'object' &&
+              params.msg === T.F.SYNC.S.UPLOAD_REJECTED_REPEATEDLY,
+          ).length;
+
+      rejectUpload();
+      await service.sync();
+      await service.sync();
+      expect(rejectedNotices()).toBe(0);
+      await service.sync();
+      await service.sync();
+      expect(rejectedNotices()).toBe(1);
+      expect(mockProviderManager.setSyncStatus.calls.mostRecent().args).toEqual([
+        'ERROR',
+      ]);
+
+      mockSyncService.uploadPendingOps.and.resolveTo({
+        kind: 'completed' as const,
+        uploadedCount: 0,
+        piggybackedOpsCount: 0,
+        localWinOpsCreated: 0,
+        permanentRejectionCount: 0,
+        hasMorePiggyback: false,
+        rejectedOps: [],
+      });
+      expect(await service.sync()).not.toBe('HANDLED_ERROR');
+
+      rejectUpload();
+      await service.sync();
+      expect(mockProviderManager.setSyncStatus.calls.mostRecent().args).toEqual([
+        'UNKNOWN_OR_CHANGED',
+      ]);
+      expect(rejectedNotices()).toBe(1);
+    });
+
     it('should explain a rejected plaintext remote for a user-triggered encrypted sync', async () => {
       mockSyncService.downloadRemoteOps.and.rejectWith(
         new PlaintextWhenEncryptionExpectedError({
