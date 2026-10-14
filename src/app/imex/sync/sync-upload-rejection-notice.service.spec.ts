@@ -1,6 +1,10 @@
 import { TestBed } from '@angular/core/testing';
+import { Subject } from 'rxjs';
 import { SnackService } from '../../core/snack/snack.service';
-import { SyncProviderManager } from '../../op-log/sync-providers/provider-manager.service';
+import {
+  SyncProviderManager,
+  SyncStatusChangePayload,
+} from '../../op-log/sync-providers/provider-manager.service';
 import { T } from '../../t.const';
 import {
   REJECTED_UPLOAD_CYCLES_BEFORE_NOTICE,
@@ -11,6 +15,7 @@ describe('SyncUploadRejectionNoticeService', () => {
   let service: SyncUploadRejectionNoticeService;
   let snackService: jasmine.SpyObj<SnackService>;
   let providerManager: jasmine.SpyObj<SyncProviderManager>;
+  let syncStatus$: Subject<SyncStatusChangePayload>;
 
   const rejectCycles = (n: number): void => {
     for (let i = 0; i < n; i++) {
@@ -24,7 +29,10 @@ describe('SyncUploadRejectionNoticeService', () => {
       'hasPendingPersistentAction',
     ]);
     snackService.hasPendingPersistentAction.and.returnValue(false);
-    providerManager = jasmine.createSpyObj('SyncProviderManager', ['setSyncStatus']);
+    syncStatus$ = new Subject<SyncStatusChangePayload>();
+    providerManager = jasmine.createSpyObj('SyncProviderManager', ['setSyncStatus'], {
+      syncStatus$,
+    });
     TestBed.configureTestingModule({
       providers: [
         { provide: SnackService, useValue: snackService },
@@ -52,7 +60,6 @@ describe('SyncUploadRejectionNoticeService', () => {
         type: 'ERROR',
       }),
     );
-    expect(providerManager.setSyncStatus).toHaveBeenCalledWith('ERROR');
     expect(providerManager.setSyncStatus.calls.mostRecent().args).toEqual(['ERROR']);
   });
 
@@ -66,9 +73,10 @@ describe('SyncUploadRejectionNoticeService', () => {
     expect(snackService.open).toHaveBeenCalledTimes(1);
   });
 
-  it('starts a new streak after a completed sync', () => {
+  it('starts a new streak after any sync reaches IN_SYNC', () => {
     rejectCycles(REJECTED_UPLOAD_CYCLES_BEFORE_NOTICE);
-    service.reset();
+    syncStatus$.next('SYNCING');
+    syncStatus$.next('IN_SYNC');
     rejectCycles(REJECTED_UPLOAD_CYCLES_BEFORE_NOTICE - 1);
 
     expect(snackService.open).toHaveBeenCalledTimes(1);
@@ -78,5 +86,14 @@ describe('SyncUploadRejectionNoticeService', () => {
 
     service.onUploadRejected();
     expect(snackService.open).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps counting through statuses other than IN_SYNC', () => {
+    rejectCycles(REJECTED_UPLOAD_CYCLES_BEFORE_NOTICE - 1);
+    syncStatus$.next('SYNCING');
+    syncStatus$.next('UNKNOWN_OR_CHANGED');
+    service.onUploadRejected();
+
+    expect(snackService.open).toHaveBeenCalledTimes(1);
   });
 });

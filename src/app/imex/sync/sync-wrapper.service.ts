@@ -864,7 +864,6 @@ export class SyncWrapperService {
       }
 
       // Mark as in-sync for all providers after successful sync
-      this._uploadRejectionNotice.reset();
       this._providerManager.setSyncStatus('IN_SYNC');
       SyncLog.log('SyncWrapperService: Sync complete, status=IN_SYNC');
 

@@ -1,4 +1,6 @@
 import { inject, Injectable } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { filter } from 'rxjs/operators';
 import { SnackService } from '../../core/snack/snack.service';
 import { SyncProviderManager } from '../../op-log/sync-providers/provider-manager.service';
 import { T } from '../../t.const';
@@ -10,9 +12,11 @@ export const REJECTED_UPLOAD_CYCLES_BEFORE_NOTICE = 3;
  * A cycle ending in `UploadRevToMatchMismatchAPIError` (the adapter already
  * re-downloaded and retried inside it) usually means another device uploaded
  * first; the next cycle resolves that silently. When it repeats cycle after
- * cycle, the server is refusing this device's writes — e.g. a proxy rewriting
- * ETags (#10808) — and local changes never leave the device. Say so once per
- * streak and keep the sync icon on error; retries continue unchanged.
+ * cycle, uploads keep failing for a reason the next download does not fix —
+ * e.g. a server rewriting ETags (#10808) or a truncated write — and local
+ * changes never leave the device. Say so once per streak and keep the sync
+ * icon on error; retries continue unchanged. Any sync that reaches IN_SYNC,
+ * on whichever path, ends the streak.
  */
 @Injectable({ providedIn: 'root' })
 export class SyncUploadRejectionNoticeService {
@@ -20,6 +24,13 @@ export class SyncUploadRejectionNoticeService {
   private _snackService = inject(SnackService);
   private _rejectedCycles = 0;
   private _hasShownNotice = false;
+
+  private _resetOnInSync = this._providerManager.syncStatus$
+    .pipe(
+      filter((status) => status === 'IN_SYNC'),
+      takeUntilDestroyed(),
+    )
+    .subscribe(() => this._reset());
 
   onUploadRejected(): void {
     this._rejectedCycles++;
@@ -38,8 +49,7 @@ export class SyncUploadRejectionNoticeService {
     }
   }
 
-  /** A completed sync ends the streak. */
-  reset(): void {
+  private _reset(): void {
     this._rejectedCycles = 0;
     this._hasShownNotice = false;
   }
