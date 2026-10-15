@@ -571,6 +571,71 @@ describe('WebdavApi', () => {
         expect(putsOf(adapter)).toHaveLength(0);
       });
 
+      it('makes the PUT conditional on the OC-ETag ownCloud/Nextcloud send alongside', async () => {
+        const file: FakeDavFile = { body: 'remote body', tag: 'abc' };
+        const adapter = makeFakeDavServer(file, {
+          etagSuffix: '-gzip',
+          exposeOcEtag: true,
+        });
+        const api = makeApi(adapter);
+
+        const { rev } = await api.download({ path: 'op-1.json' });
+        // Same-second writes keep the tag on these servers, so the rev stays
+        // the content hash; the tag only guards the GET→PUT window.
+        expect(rev).toBe(await md5HashWasm('remote body'));
+        const next = await api.upload({
+          path: 'op-1.json',
+          data: 'body two',
+          expectedRev: rev,
+        });
+        await api.upload({
+          path: 'op-1.json',
+          data: 'body three',
+          expectedRev: next.rev,
+        });
+
+        expect(file.body).toBe('body three');
+        expect(
+          putsOf(adapter).map((put) => headerValue(put, WebDavHttpHeader.IF_MATCH)),
+        ).toEqual(['"abc"', '"tag-1"']);
+      });
+
+      it('refuses a concurrent write landing between the content check and the PUT', async () => {
+        const file: FakeDavFile = { body: 'remote body', tag: 'abc' };
+        const adapter = makeFakeDavServer(file, {
+          etagSuffix: '-gzip',
+          exposeOcEtag: true,
+        });
+        const serve = adapter.request.getMockImplementation() as (
+          raw: unknown,
+        ) => Promise<WebDavHttpResponse>;
+        adapter.request.mockImplementation(async (raw: unknown) => {
+          if ((raw as DavRequest).method === 'PUT' && file.body === 'remote body') {
+            file.body = 'their body';
+            file.tag = 'xyz';
+          }
+          return serve(raw);
+        });
+        const api = makeApi(adapter);
+        const { rev } = await api.download({ path: 'op-1.json' });
+
+        await expect(
+          api.upload({ path: 'op-1.json', data: 'my new body', expectedRev: rev }),
+        ).rejects.toBeInstanceOf(RemoteFileChangedUnexpectedly);
+        expect(file.body).toBe('their body');
+      });
+
+      it('ignores OC-ETag while the generic ETag is usable', async () => {
+        const file: FakeDavFile = { body: 'remote body', tag: 'abc' };
+        const adapter = makeFakeDavServer(file, { exposeOcEtag: true });
+        const api = makeApi(adapter);
+        const { rev } = await api.download({ path: 'op-1.json' });
+        expect(rev).toBe('"abc"');
+
+        await api.upload({ path: 'op-1.json', data: 'mine', expectedRev: rev });
+        expect(headerValue(putsOf(adapter)[0]!, WebDavHttpHeader.IF_MATCH)).toBe('"abc"');
+      });
+
       it('never sends a content-coded rev stored by an earlier version in If-Match', async () => {
         // The mismatch is reported as a conflict without a PUT; the adapter's
         // normal retry re-downloads and gets a content-hash rev.
